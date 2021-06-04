@@ -474,6 +474,9 @@ export interface IRepositoryState {
   /** State associated with a squash operation */
   readonly squashState: ISquashState
 
+  /** State associated with a reorder operation */
+  readonly reorderState: IReorderState
+
   /** State associated with a multi commit operation such as rebase,
    * cherry-pick, squash, reorder... */
   readonly multiCommitOperationState: IMultiCommitOperationState | null
@@ -808,7 +811,7 @@ export interface ICherryPickState {
   readonly branchCreated: boolean
 }
 
-/** State associated with a cherry pick being performed on a repository */
+/** State associated with a squash being performed on a repository */
 export interface ISquashState {
   /**
    * The sha of the tip before squash was initiated.
@@ -823,6 +826,23 @@ export interface ISquashState {
    * This will be set to null if no squash has been initiated.
    */
   readonly squashBranchName: string | null
+}
+
+/** State associated with a reorder being performed on a repository */
+export interface IReorderState {
+  /**
+   * The sha of the tip before reorder was initiated.
+   *
+   * This will be set to null if no reorder has been initiated.
+   */
+  readonly undoSha: string | null
+
+  /**
+   * The name of the branch the reorder operation applied to
+   *
+   * This will be set to null if no reorder has been initiated.
+   */
+  readonly reorderBranchName: string | null
 }
 
 /**

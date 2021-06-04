@@ -1970,6 +1970,13 @@ export class Dispatcher {
           retryAction.lastRetainedCommitRef,
           retryAction.commitContext
         )
+      case RetryActionType.Reorder:
+        return this.reorderCommits(
+          retryAction.repository,
+          retryAction.commitsToReorder,
+          retryAction.beforeCommit,
+          retryAction.lastRetainedCommitRef
+        )
       default:
         return assertNever(retryAction, `Unknown retry action: ${retryAction}`)
     }
@@ -3094,7 +3101,59 @@ export class Dispatcher {
     beforeCommit: Commit | null,
     lastRetainedCommitRef: string | null
   ) {
-    // TODO: Implement!!
+    const retry: RetryAction = {
+      type: RetryActionType.Reorder,
+      repository,
+      commitsToReorder,
+      beforeCommit,
+      lastRetainedCommitRef,
+    }
+
+    if (this.appStore._checkForUncommittedChanges(repository, retry)) {
+      return
+    }
+
+    const stateBefore = this.repositoryStateManager.get(repository)
+    const { tip } = stateBefore.branchesState
+
+    if (tip.kind !== TipState.Valid) {
+      log.info(`[reorder] - invalid tip state - could not perform reorder.`)
+      return
+    }
+
+    this.appStore._initializeMultiCommitOperation(
+      repository,
+      {
+        kind: MultiCommitOperationKind.Reorder,
+        lastRetainedCommitRef,
+        beforeCommit,
+      },
+      tip.branch,
+      commitsToReorder
+    )
+
+    this.showPopup({
+      type: PopupType.MultiCommitOperation,
+      repository,
+    })
+
+    this.appStore._setReorderUndoState(repository, tip)
+
+    const result = await this.appStore._reorderCommits(
+      repository,
+      commitsToReorder,
+      beforeCommit,
+      lastRetainedCommitRef
+    )
+
+    this.logHowToRevertReorder(tip)
+
+    this.processReorderRebaseResult(
+      repository,
+      result,
+      commitsToReorder,
+      tip.branch.name
+    )
   }
 
   /**
@@ -3196,6 +3255,16 @@ export class Dispatcher {
     log.info(`[squash] - git reset ${beforeSha} --hard`)
   }
 
+  private logHowToRevertReorder(tip: IValidBranch): void {
+    const beforeSha = getTipSha(tip)
+    log.info(`[reorder] starting rebase for ${tip.branch.name} at ${beforeSha}`)
+    log.info(
+      `[reorder] to restore the previous state if this completed rebase is unsatisfactory:`
+    )
+    log.info(`[reorder] - git checkout ${tip.branch.name}`)
+    log.info(`[reorder] - git reset ${beforeSha} --hard`)
+  }
+
   /**
    * Processes the squash result
    *  1. Completes the squash with banner if successful.
@@ -3229,6 +3298,44 @@ export class Dispatcher {
           repository,
           targetBranchName,
           'squash commit'
+        )
+        break
+      default:
+        // TODO: clear state
+        this.appStore._closePopup()
+    }
+  }
+
+  /**
+   * Processes the reorder result
+   *  1. Completes the reorder with banner if successful.
+   *  2. Moves reorder flow to conflicts handler.
+   *  3. Handles errors.
+   */
+  public async processReorderRebaseResult(
+    repository: Repository,
+    result: RebaseResult,
+    commitsToReorder: ReadonlyArray<CommitOneLine>,
+    targetBranchName: string
+  ): Promise<void> {
+    // This will update the conflict state of the app. This is needed to start
+    // conflict flow if reorder results in conflict.
+    const status = await this.appStore._loadStatus(repository)
+    switch (result) {
+      case RebaseResult.CompletedWithoutError:
+        if (status !== null && status.currentTip !== undefined) {
+          // This sets the history to the current tip
+          await this.changeCommitSelection(repository, [status.currentTip])
+        }
+
+        await this.completeReorder(repository, commitsToReorder.length + 1)
+        break
+      case RebaseResult.ConflictsEncountered:
+        await this.refreshRepository(repository)
+        this.startMultiCommitOperationConflictFlow(
+          repository,
+          targetBranchName,
+          'reorder commit'
         )
         break
       default:
@@ -3316,6 +3423,44 @@ export class Dispatcher {
   }
 
   /**
+   * Wrap reorder actions
+   * - closes popups
+   * - refreshes repo (so changes appear in history)
+   * - sets success banner
+   * - end operation state
+   * TODO: record successful reorder stats
+   */
+  private async completeReorder(
+    repository: Repository,
+    count: number
+  ): Promise<void> {
+    this.closePopup()
+
+    const banner: Banner = {
+      type: BannerType.SuccessfulReorder,
+      count,
+      onUndo: () => {
+        this.undoReorder(repository, count)
+      },
+    }
+    this.setBanner(banner)
+
+    const {
+      branchesState,
+      multiCommitOperationState,
+    } = this.repositoryStateManager.get(repository)
+    const { tip } = branchesState
+
+    if (tip.kind === TipState.Valid && multiCommitOperationState !== null) {
+      const { originalBranchTip } = multiCommitOperationState
+      this.addRebasedBranchToForcePushList(repository, tip, originalBranchTip)
+    }
+
+    this.endMultiCommitOperation(repository)
+    await this.refreshRepository(repository)
+  }
+
+  /**
    * This method will perform a hard reset back to the tip of the branch before
    * the squash happened.
    */
@@ -3324,6 +3469,17 @@ export class Dispatcher {
     commitsCount: number
   ): Promise<boolean> {
     return this.appStore._undoSquash(repository, commitsCount)
+  }
+
+  /**
+   * This method will perform a hard reset back to the tip of the branch before
+   * the reorder happened.
+   */
+  private async undoReorder(
+    repository: Repository,
+    commitsCount: number
+  ): Promise<boolean> {
+    return this.appStore._undoReorder(repository, commitsCount)
   }
 
   /**

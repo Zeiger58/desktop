@@ -21,6 +21,7 @@ import {
   ICherryPickState,
   ISquashState,
   IMultiCommitOperationState,
+  IReorderState,
 } from '../app-state'
 import { merge } from '../merge'
 import { DefaultCommitMessage } from '../../models/commit-message'
@@ -144,6 +145,17 @@ export class RepositoryStateCache {
     })
   }
 
+  public updateReorderState<K extends keyof IReorderState>(
+    repository: Repository,
+    fn: (state: IReorderState) => Pick<IReorderState, K>
+  ) {
+    this.update(repository, state => {
+      const { reorderState } = state
+      const newState = merge(reorderState, fn(reorderState))
+      return { reorderState: newState }
+    })
+  }
+
   public updateMultiCommitOperationState<
     K extends keyof IMultiCommitOperationState
   >(
@@ -260,6 +272,10 @@ function getInitialRepositoryState(): IRepositoryState {
     squashState: {
       undoSha: null,
       squashBranchName: null,
+    },
+    reorderState: {
+      undoSha: null,
+      reorderBranchName: null,
     },
     multiCommitOperationState: null,
   }

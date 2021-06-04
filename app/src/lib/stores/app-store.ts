@@ -291,6 +291,7 @@ import {
   MultiCommitOperationStep,
   MultiCommitOperationStepKind,
 } from '../../models/multi-commit-operation'
+import { reorder } from '../git/reorder'
 
 const LastSelectedRepositoryIDKey = 'last-selected-repository-id'
 
@@ -6402,6 +6403,43 @@ export class AppStore extends TypedBaseStore<IAppState> {
   }
 
   /** This shouldn't be called directly. See `Dispatcher`. */
+  public async _reorderCommits(
+    repository: Repository,
+    commitsToReorder: ReadonlyArray<Commit>,
+    beforeCommit: Commit | null,
+    lastRetainedCommitRef: string | null
+  ): Promise<RebaseResult> {
+    if (commitsToReorder.length === 0) {
+      log.error('[_reorder] - Unable to reorder. No commits provided.')
+      return RebaseResult.Error
+    }
+
+    const progressCallback = (progress: IMultiCommitOperationProgress) => {
+      this.repositoryStateCache.updateMultiCommitOperationState(
+        repository,
+        () => ({
+          progress,
+        })
+      )
+
+      this.emitUpdate()
+    }
+
+    const gitStore = this.gitStoreCache.get(repository)
+    const result = await gitStore.performFailableOperation(() =>
+      reorder(
+        repository,
+        commitsToReorder,
+        beforeCommit,
+        lastRetainedCommitRef,
+        progressCallback
+      )
+    )
+
+    return result || RebaseResult.Error
+  }
+
+  /** This shouldn't be called directly. See `Dispatcher`. */
   public async _squash(
     repository: Repository,
     toSquash: ReadonlyArray<Commit>,
@@ -6503,6 +6541,67 @@ export class AppStore extends TypedBaseStore<IAppState> {
   }
 
   /** This shouldn't be called directly. See `Dispatcher`. */
+  public async _undoReorder(
+    repository: Repository,
+    commitsCount: number
+  ): Promise<boolean> {
+    const {
+      branchesState,
+      reorderState: { undoSha, reorderBranchName },
+      changesState: { workingDirectory },
+    } = this.repositoryStateCache.get(repository)
+
+    if (workingDirectory.files.length > 0) {
+      log.error(
+        '[undoReorder] - Could not undo reorder. This would delete the local changes that exist on the branch.'
+      )
+      return false
+    }
+
+    const { tip } = branchesState
+    if (tip.kind !== TipState.Valid || tip.branch.name !== reorderBranchName) {
+      log.error(
+        '[undoReorder] - Could not undo reorder.  User no longer on branch the reorder occurred on.'
+      )
+      return false
+    }
+
+    if (undoSha === null) {
+      log.error('[undoReorder] - Could not determine undo sha')
+      return false
+    }
+
+    const gitStore = this.gitStoreCache.get(repository)
+    const result = await gitStore.performFailableOperation(() =>
+      reset(repository, GitResetMode.Hard, undoSha)
+    )
+
+    if (result !== true) {
+      return false
+    }
+
+    const banner: Banner = {
+      type: BannerType.ReorderUndone,
+      commitsCount,
+    }
+    this._setBanner(banner)
+
+    await this._loadStatus(repository)
+    const stateAfter = this.repositoryStateCache.get(repository)
+    if (stateAfter.branchesState.tip.kind === TipState.Valid) {
+      this._addRebasedBranchToForcePushList(
+        repository,
+        stateAfter.branchesState.tip,
+        tip.branch.tip.sha
+      )
+    }
+
+    await this._refreshRepository(repository)
+
+    return true
+  }
+
+  /** This shouldn't be called directly. See `Dispatcher`. */
   public _addRebasedBranchToForcePushList = (
     repository: Repository,
     tipWithBranch: IValidBranch,
@@ -6535,6 +6634,16 @@ export class AppStore extends TypedBaseStore<IAppState> {
     this.repositoryStateCache.updateSquashState(repository, () => ({
       undoSha: getTipSha(tip),
       squashBranchName: tip.branch.name,
+    }))
+  }
+
+  /** This shouldn't be called directly. See `Dispatcher`. */
+  public _setReorderUndoState(repository: Repository, tip: IValidBranch): void {
+    // An update is not emitted here because there is no need
+    // to trigger a re-render at this point. (storing for later)
+    this.repositoryStateCache.updateReorderState(repository, () => ({
+      undoSha: getTipSha(tip),
+      reorderBranchName: tip.branch.name,
     }))
   }
 
